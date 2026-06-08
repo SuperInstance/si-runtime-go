@@ -7,13 +7,13 @@ import (
 	"sync"
 )
 
-// Fleet is a collection of agents with shared conservation and spectral
-// infrastructure.
+// Fleet is a collection of agents with shared spectral and conservation infrastructure.
 type Fleet struct {
-	ID       string
-	Agents   map[string]*Agent
+	ID        string
+	Agents    map[string]*Agent
+	Budgets   map[string]*AgentBudget
 	Adjacency *AdjacencyMatrix
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 }
 
 // NewFleet creates a fleet with the given identifier.
@@ -21,16 +21,14 @@ func NewFleet(id string) *Fleet {
 	return &Fleet{
 		ID:      id,
 		Agents:  make(map[string]*Agent),
+		Budgets: make(map[string]*AgentBudget),
 	}
 }
 
-// AddAgent registers an agent with the fleet.
-func (f *Fleet) AddAgent(a *Agent) error {
-	if a == nil {
-		return fmt.Errorf("cannot add nil agent")
-	}
-	if a.ID == "" {
-		return fmt.Errorf("agent ID cannot be empty")
+// AddAgent registers an agent and optionally its budget.
+func (f *Fleet) AddAgent(a *Agent, budget *Budget) error {
+	if a == nil || a.ID == "" {
+		return fmt.Errorf("agent cannot be nil and must have an ID")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -38,18 +36,22 @@ func (f *Fleet) AddAgent(a *Agent) error {
 		return fmt.Errorf("agent %s already in fleet %s", a.ID, f.ID)
 	}
 	f.Agents[a.ID] = a
-	f.Adjacency = nil // invalidate cached matrix
+	if budget != nil {
+		f.Budgets[a.ID] = &AgentBudget{AgentID: a.ID, Budget: budget}
+	}
+	f.Adjacency = nil
 	return nil
 }
 
-// RemoveAgent unregisters an agent.
+// RemoveAgent unregisters an agent and its budget.
 func (f *Fleet) RemoveAgent(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.Agents[id]; !exists {
+	if _, ok := f.Agents[id]; !ok {
 		return false
 	}
 	delete(f.Agents, id)
+	delete(f.Budgets, id)
 	f.Adjacency = nil
 	return true
 }
@@ -62,7 +64,7 @@ func (f *Fleet) GetAgent(id string) (*Agent, bool) {
 	return a, ok
 }
 
-// ListAgents returns all agents in the fleet.
+// ListAgents returns all agents sorted by ID.
 func (f *Fleet) ListAgents() []*Agent {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -70,6 +72,7 @@ func (f *Fleet) ListAgents() []*Agent {
 	for _, a := range f.Agents {
 		out = append(out, a)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -81,17 +84,12 @@ func (f *Fleet) AgentCount() int {
 }
 
 // BuildAdjacencyMatrix constructs an affinity matrix from agent states.
-// The affinity between agents i and j is computed by the provided function.
 func (f *Fleet) BuildAdjacencyMatrix(affinity func(a, b *Agent) float64) (*AdjacencyMatrix, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	agents := f.agentSlice()
+	agents := f.ListAgents()
 	n := len(agents)
 	if n == 0 {
 		return nil, fmt.Errorf("fleet %s has no agents", f.ID)
 	}
-
 	m := NewAdjacencyMatrix(n)
 	for i := 0; i < n; i++ {
 		for j := i; j < n; j++ {
@@ -103,18 +101,16 @@ func (f *Fleet) BuildAdjacencyMatrix(affinity func(a, b *Agent) float64) (*Adjac
 	return m, nil
 }
 
-// SpectralRank ranks agents by eigenvector centrality using their
-// current adjacency matrix. If no matrix exists, one is built from
-// workload state similarity.
+// SpectralRank ranks agents by eigenvector centrality.
 func (f *Fleet) SpectralRank() ([]RankedAgent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	if f.Adjacency == nil {
-		agents := f.agentSlice()
-		m := NewAdjacencyMatrix(len(agents))
-		for i := 0; i < len(agents); i++ {
-			for j := i; j < len(agents); j++ {
+		agents := f.sortedAgents()
+		n := len(agents)
+		m := NewAdjacencyMatrix(n)
+		for i := 0; i < n; i++ {
+			for j := i; j < n; j++ {
 				var aff float64
 				if i == j {
 					aff = 1.0
@@ -130,133 +126,105 @@ func (f *Fleet) SpectralRank() ([]RankedAgent, error) {
 		}
 		f.Adjacency = m
 	}
-
 	return SpectralRank(f.Adjacency)
 }
 
-// ConservationAudit verifies that every agent's budget satisfies
-// gamma + eta == total, and computes fleet-wide aggregates.
+// ConservationAudit verifies gamma+eta==total for all budgeted agents.
 func (f *Fleet) ConservationAudit() AuditResult {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-
-	var budgets []*AgentBudget
-	for _, a := range f.Agents {
-		if a.Budget != nil {
-			budgets = append(budgets, a.Budget)
-		}
+	budgets := make([]*AgentBudget, 0, len(f.Budgets))
+	for _, ab := range f.Budgets {
+		budgets = append(budgets, ab)
 	}
 	return Audit(budgets)
 }
 
-// TotalFleetBudget returns the sum of all agent budget totals.
-func (f *Fleet) TotalFleetBudget() float64 {
+// HealthReport holds fleet-wide homeostasis diagnostics.
+type HealthReport struct {
+	AgentErrors map[string]float64
+	FleetAvg    float64
+	WorstAgent  string
+}
+
+// HealthReport computes homeostasis error for every agent.
+func (f *Fleet) HealthReport() HealthReport {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	rpt := HealthReport{AgentErrors: make(map[string]float64)}
+	if len(f.Agents) == 0 {
+		return rpt
+	}
 	var sum float64
-	for _, a := range f.Agents {
-		if a.Budget != nil {
-			sum += a.Budget.Budget.Total
+	worst := 0.0
+	for id, a := range f.Agents {
+		err := a.HomeostasisError()
+		rpt.AgentErrors[id] = err
+		sum += err
+		if err > worst {
+			worst = err
+			rpt.WorstAgent = id
 		}
 	}
-	return sum
+	rpt.FleetAvg = sum / float64(len(f.Agents))
+	return rpt
 }
 
-// FleetHomeostasisError returns the average homeostasis error across all agents.
-func (f *Fleet) FleetHomeostasisError() float64 {
+// BestAgentForTask finds the agent with the most matching capabilities.
+func (f *Fleet) BestAgentForTask(required []string) (MatchResult, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if len(f.Agents) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, a := range f.Agents {
-		sum += a.HomeostasisError()
-	}
-	return sum / float64(len(f.Agents))
-}
-
-// BestAgentForTask finds the agent most capable of handling the given requirements.
-func (f *Fleet) BestAgentForTask(required []string, threshold float64) (MatchResult, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
 	if len(f.Agents) == 0 {
 		return MatchResult{}, fmt.Errorf("fleet %s has no agents", f.ID)
 	}
-
 	var candidates []MatchResult
 	for _, a := range f.Agents {
-		caps := a.ListCapabilities()
-		result := Match(a.ID, caps, required, threshold)
-		candidates = append(candidates, result)
+		candidates = append(candidates, Match(a.ID, a.ListCapabilities(), required))
 	}
-
-	best, ok := BestMatch(candidates)
+	best, ok := Resolve(candidates)
 	if !ok {
-		return MatchResult{}, fmt.Errorf("no matching agent found")
+		return MatchResult{}, fmt.Errorf("no agent matches requirements")
 	}
 	return best, nil
 }
 
-// SortAgentsByCapability sorts agents by total capability score descending.
-func (f *Fleet) SortAgentsByCapability() []*Agent {
-	agents := f.ListAgents()
-	sort.Slice(agents, func(i, j int) bool {
-		return agents[i].TotalCapabilityScore() > agents[j].TotalCapabilityScore()
-	})
-	return agents
-}
-
-// RebalanceBudgets redistributes eta proportionally so that every agent
-// has the same eta fraction of its total budget.
+// RebalanceBudgets equalizes the eta fraction across all budgeted agents.
 func (f *Fleet) RebalanceBudgets() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	var totalEta, totalBudget float64
-	var withBudget []*Agent
-	for _, a := range f.Agents {
-		if a.Budget != nil {
-			withBudget = append(withBudget, a)
-			totalEta += a.Budget.Budget.Eta
-			totalBudget += a.Budget.Budget.Total
-		}
+	var withBudget []*AgentBudget
+	for _, ab := range f.Budgets {
+		withBudget = append(withBudget, ab)
+		totalEta += ab.Budget.Eta
+		totalBudget += ab.Budget.Total
 	}
-
 	if len(withBudget) == 0 || totalBudget == 0 {
 		return nil
 	}
-
-	// Target eta fraction for each agent = fleet average
 	targetFraction := totalEta / totalBudget
-	for _, a := range withBudget {
-		targetEta := a.Budget.Budget.Total * targetFraction
-		delta := targetEta - a.Budget.Budget.Eta
-		a.Budget.Budget.Eta += delta
-		a.Budget.Budget.Gamma -= delta
-		// Clamp to non-negative
-		if a.Budget.Budget.Gamma < 0 {
-			a.Budget.Budget.Eta += a.Budget.Budget.Gamma
-			a.Budget.Budget.Gamma = 0
+	for _, ab := range withBudget {
+		targetEta := ab.Budget.Total * targetFraction
+		delta := targetEta - ab.Budget.Eta
+		ab.Budget.Eta += delta
+		ab.Budget.Gamma -= delta
+		if ab.Budget.Gamma < 0 {
+			ab.Budget.Eta += ab.Budget.Gamma
+			ab.Budget.Gamma = 0
 		}
-		if a.Budget.Budget.Eta < 0 {
-			a.Budget.Budget.Gamma += a.Budget.Budget.Eta
-			a.Budget.Budget.Eta = 0
+		if ab.Budget.Eta < 0 {
+			ab.Budget.Gamma += ab.Budget.Eta
+			ab.Budget.Eta = 0
 		}
 	}
 	return nil
 }
 
-// helper: stable slice of agents for indexing
-func (f *Fleet) agentSlice() []*Agent {
+func (f *Fleet) sortedAgents() []*Agent {
 	out := make([]*Agent, 0, len(f.Agents))
 	for _, a := range f.Agents {
 		out = append(out, a)
 	}
-	// Sort by ID for determinism
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ID < out[j].ID
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }

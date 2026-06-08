@@ -23,6 +23,7 @@ go get github.com/SuperInstance/si-runtime-go
 7. [Fleet Orchestration](#fleet-orchestration)
 8. [Running Tests](#running-tests)
 9. [API Overview](#api-overview)
+10. [Docker](#docker)
 
 ---
 
@@ -30,15 +31,15 @@ go get github.com/SuperInstance/si-runtime-go
 
 The SuperInstance runtime treats an agent fleet as a physical system:
 
-- **Budget** — A conserved quantity split into productive spend (`gamma`)
-  and overhead (`eta`). The invariant `gamma + eta == total` is enforced
-  at compile time via the API.
+- **Budget** — A conserved quantity split into productive spend (`Gamma`)
+  and overhead (`Eta`). The invariant `Gamma + Eta == Total` is enforced
+  by the API.
 - **Spectral ranking** — Agents are nodes in a graph; eigenvector
   centrality identifies the most connected / influential agents.
 - **Capabilities** — Each agent advertises skills. The fleet matches tasks
   to the best-qualified agent.
 - **Homeostasis** — Agents maintain internal state variables near target
-  values, like biological cells regulating temperature or pH.
+  values, like biological cells regulating temperature.
 - **Cells** — A cellular-automaton layer for spatial diffusion and
   emergent pattern formation.
 
@@ -47,7 +48,7 @@ The SuperInstance runtime treats an agent fleet as a physical system:
 ## Conservation Budgets
 
 A `Budget` has three fields: `Total`, `Gamma`, and `Eta`. The API
-guarantees (and `Audit` verifies) that `Gamma + Eta == Total`.
+enforces `Gamma + Eta == Total`.
 
 ```go
 package main
@@ -60,32 +61,19 @@ import (
 )
 
 func main() {
-    // Create a fleet-wide budget of 1000 tokens
     b := siruntime.NewBudget(1000)
     fmt.Printf("initial: total=%.0f gamma=%.0f eta=%.0f\n", b.Total, b.Gamma, b.Eta)
     // Output: initial: total=1000 gamma=0 eta=1000
 
-    // Allocate 600 to productive work, 400 to overhead
     if err := b.Allocate(600, 400); err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("allocated: total=%.0f gamma=%.0f eta=%.0f\n", b.Total, b.Gamma, b.Eta)
-    // Output: allocated: total=1000 gamma=600 eta=400
+    fmt.Printf("allocated: gamma=%.0f eta=%.0f\n", b.Gamma, b.Eta)
 
-    // Move 200 from eta into gamma (converting idle capacity to work)
     if err := b.Transfer(200); err != nil {
         log.Fatal(err)
     }
     fmt.Printf("transferred: gamma=%.0f eta=%.0f\n", b.Gamma, b.Eta)
-    // Output: transferred: gamma=800 eta=200
-
-    // Overspend: try to spend 900 from gamma (only 800 available)
-    shortfall, err := b.Overspend(900)
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("overspend shortfall=%.0f gamma=%.0f eta=%.0f\n", shortfall, b.Gamma, b.Eta)
-    // Output: overspend shortfall=100 gamma=0 eta=100
 }
 ```
 
@@ -93,17 +81,15 @@ func main() {
 
 ```go
 alice := &siruntime.AgentBudget{AgentID: "alice", Budget: siruntime.NewBudget(100)}
-alice.Budget.Allocate(80, 20)
+alice.Allocate(80, 20)
 
 bob := &siruntime.AgentBudget{AgentID: "bob", Budget: siruntime.NewBudget(100)}
-bob.Budget.Allocate(30, 70)
+bob.Allocate(30, 70)
 
-// Move 50 tokens of productive budget from alice to bob
-if err := siruntime.Transfer(alice, bob, 50); err != nil {
+if err := alice.Transfer(bob, 50); err != nil {
     log.Fatal(err)
 }
 fmt.Printf("alice gamma=%.0f, bob gamma=%.0f\n", alice.Budget.Gamma, bob.Budget.Gamma)
-// Output: alice gamma=30, bob gamma=80
 ```
 
 ### Fleet-wide audit
@@ -111,9 +97,8 @@ fmt.Printf("alice gamma=%.0f, bob gamma=%.0f\n", alice.Budget.Gamma, bob.Budget.
 ```go
 agents := []*siruntime.AgentBudget{alice, bob}
 result := siruntime.Audit(agents)
-fmt.Printf("valid=%v fleet_total=%.0f fleet_gamma=%.0f fleet_eta=%.0f\n",
+fmt.Printf("valid=%v total=%.0f gamma=%.0f eta=%.0f\n",
     result.Valid, result.FleetTotal, result.FleetGamma, result.FleetEta)
-// Output: valid=true fleet_total=200 fleet_gamma=110 fleet_eta=90
 ```
 
 ---
@@ -147,26 +132,9 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-
     for _, r := range ranked {
         fmt.Printf("agent %d: centrality=%.4f\n", r.Index, r.Centrality)
     }
-    // Output:
-    // agent 0: centrality=0.7399
-    // agent 1: centrality=0.6148
-    // agent 2: centrality=0.2712
-}
-```
-
-### Top-k eigenpairs
-
-```go
-pairs, err := siruntime.TopKEigenpairs(m, 2, 1000, 1e-8)
-if err != nil {
-    log.Fatal(err)
-}
-for i, pair := range pairs.Pairs {
-    fmt.Printf("eigenvalue %d: %.4f\n", i, pair.Value)
 }
 ```
 
@@ -174,8 +142,8 @@ for i, pair := range pairs.Pairs {
 
 ## Capability Registry
 
-Agents advertise capabilities. The registry stores them; the `Match`
-function scores task-agent compatibility.
+Agents advertise capabilities. The registry stores them; `Match` scores
+task-agent compatibility.
 
 ```go
 package main
@@ -187,34 +155,22 @@ import (
 )
 
 func main() {
-    reg := siruntime.NewCapabilityRegistry()
-    reg.Register(siruntime.Capability{Name: "plan", Version: "1.0", Score: 0.9})
-    reg.Register(siruntime.Capability{Name: "code", Version: "2.0", Score: 0.8})
-    reg.Register(siruntime.Capability{Name: "review", Version: "1.0", Score: 0.7})
+    reg := siruntime.NewRegistry()
+    reg.Register(siruntime.Capability{Name: "plan", Version: "1.0", Provides: []string{"strategy"}})
+    reg.Register(siruntime.Capability{Name: "code", Version: "2.0", Provides: []string{"implementation"}})
 
     c, ok := reg.Get("code")
-    fmt.Printf("found=%v score=%.1f\n", ok, c.Score)
-    // Output: found=true score=0.8
-
-    caps := reg.List()
-    fmt.Printf("registered capabilities: %d\n", len(caps))
-    // Output: registered capabilities: 3
+    fmt.Printf("found=%v version=%s\n", ok, c.Version)
 }
 ```
 
 ### Matching agents to tasks
 
 ```go
-agentCaps := []siruntime.Capability{
-    {Name: "read", Score: 1.0},
-    {Name: "write", Score: 0.5},
-}
+agentCaps := []string{"read", "write"}
 required := []string{"read", "write"}
-
-result := siruntime.Match("agent-1", agentCaps, required, 0.6)
-fmt.Printf("score=%.2f matched=%v partial=%v missing=%v\n",
-    result.Score, result.Matched, result.Partial, result.Missing)
-// Output: score=0.75 matched=[read] partial=[write] missing=[]
+result := siruntime.Match("agent-1", agentCaps, required)
+fmt.Printf("score=%.2f matched=%v missing=%v\n", result.Score, result.Matched, result.Missing)
 ```
 
 ---
@@ -222,7 +178,7 @@ fmt.Printf("score=%.2f matched=%v partial=%v missing=%v\n",
 ## Cellular Homeostasis
 
 A `Grid` of `Cell` values diffuses state toward neighbors and toward a
-homeostatic target. This models spatial load balancing or heat diffusion.
+homeostatic target.
 
 ```go
 package main
@@ -234,30 +190,15 @@ import (
 )
 
 func main() {
-    // 5×5 grid, all cells start at 0.0, target is 10.0
     g := siruntime.NewGrid(5, 5, 0.0, 10.0)
     g.WireNeighbors()
-
-    // Heat one corner cell
     g.Cells[0].State = 100.0
-
     for step := 0; step < 20; step++ {
         g.UpdateAll(0.3, 0.1)
     }
-
     fmt.Printf("corner=%.2f center=%.2f variance=%.2f\n",
         g.Cells[0].State, g.Cells[12].State, g.Variance())
-    // The heat diffuses from the corner toward the rest of the grid.
 }
-```
-
-### Single-cell update
-
-```go
-c := siruntime.NewCell("c1", 10.0, 20.0)
-c.Update(0.0, 0.5) // no diffusion, pure homeostasis
-fmt.Printf("state=%.2f\n", c.State)
-// Output: state=15.00
 ```
 
 ---
@@ -279,19 +220,14 @@ func main() {
     a := siruntime.NewAgent("planner-1")
     a.SetState("energy", 50.0)
     a.SetHomeostasis("energy", 100.0)
-    a.AddCapability(siruntime.Capability{Name: "plan", Score: 0.95})
-    a.AddCapability(siruntime.Capability{Name: "negotiate", Score: 0.7})
-    a.AttachBudget(500)
-    a.Budget.Budget.Allocate(300, 200)
+    a.AddCapability("plan")
+    a.AddCapability("negotiate")
 
     fmt.Println(a.String())
-    // Output: Agent[planner-1] caps=2 budget(total=500 γ=300 η=200)
 
-    // Drive energy toward its target
     a.UpdateHomeostasis(0.1)
     energy, _ := a.GetState("energy")
     fmt.Printf("energy=%.2f error=%.2f\n", energy, a.HomeostasisError())
-    // Output: energy=55.00 error=45.00
 }
 ```
 
@@ -299,8 +235,7 @@ func main() {
 
 ## Fleet Orchestration
 
-A `Fleet` owns agents, builds their adjacency matrix, ranks them
-spectrally, audits their budgets, and matches tasks.
+A `Fleet` owns agents, ranks them spectrally, audits budgets, and matches tasks.
 
 ```go
 package main
@@ -315,60 +250,54 @@ import (
 func main() {
     fleet := siruntime.NewFleet("production")
 
-    // Create agents
     a1 := siruntime.NewAgent("api-gateway")
     a1.SetState("workload", 80.0)
-    a1.AttachBudget(1000)
-    a1.Budget.Budget.Allocate(700, 300)
-    a1.AddCapability(siruntime.Capability{Name: "route", Score: 0.95})
+    a1.AddCapability("route")
+    fleet.AddAgent(a1, siruntime.NewBudget(1000))
+    fleet.Budgets["api-gateway"].Allocate(700, 300)
 
     a2 := siruntime.NewAgent("ml-inference")
     a2.SetState("workload", 95.0)
-    a2.AttachBudget(1000)
-    a2.Budget.Budget.Allocate(600, 400)
-    a2.AddCapability(siruntime.Capability{Name: "inference", Score: 0.9})
+    a2.AddCapability("inference")
+    fleet.AddAgent(a2, siruntime.NewBudget(1000))
+    fleet.Budgets["ml-inference"].Allocate(600, 400)
 
     a3 := siruntime.NewAgent("cache-layer")
     a3.SetState("workload", 40.0)
-    a3.AttachBudget(1000)
-    a3.Budget.Budget.Allocate(200, 800)
-    a3.AddCapability(siruntime.Capability{Name: "route", Score: 0.6})
-
-    fleet.AddAgent(a1)
-    fleet.AddAgent(a2)
-    fleet.AddAgent(a3)
+    a3.AddCapability("route")
+    fleet.AddAgent(a3, siruntime.NewBudget(1000))
+    fleet.Budgets["cache-layer"].Allocate(200, 800)
 
     // Conservation audit
     audit := fleet.ConservationAudit()
     fmt.Printf("audit valid=%v fleet_total=%.0f\n", audit.Valid, audit.FleetTotal)
-    // Output: audit valid=true fleet_total=3000
 
-    // Spectral rank by workload similarity
+    // Spectral rank
     ranked, err := fleet.SpectralRank()
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Println("Spectral ranking:")
     for _, r := range ranked {
-        fmt.Printf("  agent %d: centrality=%.4f\n", r.Index, r.Centrality)
+        fmt.Printf("agent %d: centrality=%.4f\n", r.Index, r.Centrality)
     }
 
     // Best agent for routing
-    best, err := fleet.BestAgentForTask([]string{"route"}, 0.5)
+    best, err := fleet.BestAgentForTask([]string{"route"})
     if err != nil {
         log.Fatal(err)
     }
     fmt.Printf("best router: %s (score=%.2f)\n", best.AgentID, best.Score)
-    // Output: best router: api-gateway (score=0.95)
 
-    // Rebalance budgets so every agent has the same eta fraction
+    // Health report
+    rpt := fleet.HealthReport()
+    fmt.Printf("fleet avg error=%.2f worst=%s\n", rpt.FleetAvg, rpt.WorstAgent)
+
+    // Rebalance budgets
     fleet.RebalanceBudgets()
-    fmt.Println("After rebalancing:")
     for _, a := range fleet.ListAgents() {
-        fmt.Printf("  %s: gamma=%.0f eta=%.0f\n", a.ID,
-            a.Budget.Budget.Gamma, a.Budget.Budget.Eta)
+        ab := fleet.Budgets[a.ID]
+        fmt.Printf("%s: gamma=%.0f eta=%.0f\n", a.ID, ab.Budget.Gamma, ab.Budget.Eta)
     }
-    // Every agent now has eta ≈ 500 (half of 1000)
 }
 ```
 
@@ -380,28 +309,29 @@ func main() {
 go test -v ./...
 ```
 
-The test suite covers:
+The test suite includes table-driven tests covering:
 
-- Budget allocation, transfer, overspend, and inter-agent transfer
+- Budget allocation with invariant enforcement
+- Budget transfer and overspend handling
+- Inter-agent budget transfers
 - Fleet-wide conservation audit
-- Adjacency matrix construction and symmetry
-- Power iteration and eigenpair extraction
-- Spectral ranking and centrality ordering
-- Capability registry registration and retrieval
-- Task-agent matching with threshold scoring
-- Best-match selection from candidates
+- Adjacency matrix symmetry and bounds
+- Power iteration for dominant eigenpair
+- Spectral ranking ordering
+- Capability registry CRUD operations
+- Task-agent matching with thresholds
+- Best-match resolution
 - Cell homeostatic update
 - Grid diffusion toward equilibrium
-- Agent state, homeostasis error, capability add/remove
-- Fleet add/remove, conservation audit, spectral rank
-- Task-to-agent matching in a fleet
-- Budget rebalancing across fleet members
-
-Run benchmarks:
-
-```bash
-go test -bench=. ./...
-```
+- Neighbor index validation
+- Agent homeostasis convergence
+- Capability add/remove deduplication
+- Fleet add/remove agent lifecycle
+- Fleet conservation audit with budgets
+- Fleet spectral ranking from workload
+- Fleet task-to-agent matching
+- Fleet budget rebalancing
+- Fleet health report computation
 
 ---
 
@@ -413,7 +343,7 @@ go test -bench=. ./...
 |------|---------|
 | `Budget` | Conserved resource pool with `Total`, `Gamma`, `Eta` |
 | `AgentBudget` | Couples an agent ID to a `Budget` |
-| `Transfer(from, to, amount)` | Move gamma between agents |
+| `Transfer(to, amount)` | Move gamma between agents |
 | `Audit(budgets)` | Verify `gamma + eta == total` fleet-wide |
 
 ### Spectral (`spectral.go`)
@@ -423,25 +353,24 @@ go test -bench=. ./...
 | `AdjacencyMatrix` | Dense symmetric affinity matrix |
 | `Eigenpair` | One `(eigenvalue, eigenvector)` pair |
 | `PowerIteration(m, maxIter, tol)` | Dominant eigenpair via power method |
-| `TopKEigenpairs(m, k, maxIter, tol)` | Top-k eigenpairs with deflation |
 | `SpectralRank(m)` | Agents sorted by eigenvector centrality |
 
 ### Capabilities (`capability.go`)
 
 | Type | Purpose |
 |------|---------|
-| `Capability` | Named skill with version and score |
-| `CapabilityRegistry` | Thread-safe capability store |
-| `Match(agentID, caps, required, threshold)` | Score task compatibility |
-| `BestMatch(candidates)` | Select highest-scoring candidate |
+| `Capability` | Named skill with `Provides` and `Requires` |
+| `Registry` | Thread-safe capability store |
+| `Match(agentID, caps, required)` | Score task compatibility |
+| `Resolve(candidates)` | Select highest-scoring candidate |
 
 ### Cells (`cell.go`)
 
 | Type | Purpose |
 |------|---------|
-| `Cell` | Single unit with state, target, and neighbors |
+| `Cell` | Single unit with state, target, and neighbor indices |
 | `Grid` | Rectangular lattice of cells |
-| `Update(alpha, beta)` | Diffusion + homeostasis step |
+| `Update(cells, alpha, beta)` | Diffusion + homeostasis step |
 | `UpdateAll(alpha, beta)` | Synchronous grid update |
 | `EquilibriumCheck(tolerance)` | All cells near target |
 
@@ -449,25 +378,39 @@ go test -bench=. ./...
 
 | Type | Purpose |
 |------|---------|
-| `Agent` | ID, state map, capabilities, homeostasis targets |
-| `AddCapability(c)` | Register a capability |
+| `Agent` | ID, state map, capability names, homeostasis targets |
+| `AddCapability(name)` | Register a capability |
 | `RemoveCapability(name)` | Unregister by name |
 | `UpdateHomeostasis(rate)` | Drive state toward targets |
 | `HomeostasisError()` | RMS deviation from targets |
-| `AttachBudget(total)` | Link a conserved budget |
 
 ### Fleet (`fleet.go`)
 
 | Type | Purpose |
 |------|---------|
 | `Fleet` | Container for agents with shared infrastructure |
-| `AddAgent(a)` | Register an agent |
+| `AddAgent(a, budget)` | Register an agent with optional budget |
 | `RemoveAgent(id)` | Unregister by ID |
 | `BuildAdjacencyMatrix(affinity)` | Construct affinity from agent states |
 | `SpectralRank()` | Rank agents by centrality |
 | `ConservationAudit()` | Verify all budgets |
-| `BestAgentForTask(required, threshold)` | Match task to best agent |
+| `HealthReport()` | Per-agent homeostasis diagnostics |
+| `BestAgentForTask(required)` | Match task to best agent |
 | `RebalanceBudgets()` | Equalize eta fractions fleet-wide |
+
+---
+
+## Docker
+
+Build and test in a container:
+
+```bash
+docker build -t si-runtime-go .
+```
+
+The Dockerfile uses a multi-stage build: the builder stage compiles and
+runs tests; the runtime stage copies the artifact into a minimal Alpine
+image.
 
 ---
 

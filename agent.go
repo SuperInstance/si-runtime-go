@@ -8,12 +8,11 @@ import (
 
 // Agent represents a computational agent in the SuperInstance fleet.
 type Agent struct {
-	ID            string
-	State         map[string]float64 // arbitrary scalar state variables
-	Capabilities  []Capability
-	Homeostasis   map[string]float64 // target values for state variables
-	Budget        *AgentBudget
-	mu            sync.RWMutex
+	ID           string
+	State        map[string]float64
+	Capabilities []string
+	Homeostasis  map[string]float64
+	mu           sync.RWMutex
 }
 
 // NewAgent creates an agent with the given ID.
@@ -21,7 +20,7 @@ func NewAgent(id string) *Agent {
 	return &Agent{
 		ID:           id,
 		State:        make(map[string]float64),
-		Capabilities: make([]Capability, 0),
+		Capabilities: make([]string, 0),
 		Homeostasis:  make(map[string]float64),
 	}
 }
@@ -48,19 +47,19 @@ func (a *Agent) SetHomeostasis(key string, target float64) {
 	a.Homeostasis[key] = target
 }
 
-// AddCapability adds a capability to the agent.
-func (a *Agent) AddCapability(c Capability) error {
-	if c.Name == "" {
+// AddCapability adds a capability name to the agent.
+func (a *Agent) AddCapability(name string) error {
+	if name == "" {
 		return fmt.Errorf("capability name cannot be empty")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, existing := range a.Capabilities {
-		if existing.Name == c.Name {
-			return fmt.Errorf("agent %s already has capability %s", a.ID, c.Name)
+		if existing == name {
+			return fmt.Errorf("agent %s already has capability %s", a.ID, name)
 		}
 	}
-	a.Capabilities = append(a.Capabilities, c)
+	a.Capabilities = append(a.Capabilities, name)
 	return nil
 }
 
@@ -69,7 +68,7 @@ func (a *Agent) RemoveCapability(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i, c := range a.Capabilities {
-		if c.Name == name {
+		if c == name {
 			a.Capabilities = append(a.Capabilities[:i], a.Capabilities[i+1:]...)
 			return true
 		}
@@ -77,17 +76,16 @@ func (a *Agent) RemoveCapability(name string) bool {
 	return false
 }
 
-// ListCapabilities returns a copy of the agent's capabilities.
-func (a *Agent) ListCapabilities() []Capability {
+// ListCapabilities returns a copy of the agent's capability names.
+func (a *Agent) ListCapabilities() []string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	out := make([]Capability, len(a.Capabilities))
+	out := make([]string, len(a.Capabilities))
 	copy(out, a.Capabilities)
 	return out
 }
 
-// UpdateHomeostasis drives each state variable toward its target:
-//   state[k] += rate * (homeostasis[k] - state[k])
+// UpdateHomeostasis drives each state variable toward its target.
 func (a *Agent) UpdateHomeostasis(rate float64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -97,7 +95,7 @@ func (a *Agent) UpdateHomeostasis(rate float64) {
 	}
 }
 
-// HomeostasisError computes the root-mean-square deviation from targets.
+// HomeostasisError computes RMS deviation from targets.
 func (a *Agent) HomeostasisError() float64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -112,35 +110,9 @@ func (a *Agent) HomeostasisError() float64 {
 	return math.Sqrt(sumSq / float64(len(a.Homeostasis)))
 }
 
-// AttachBudget links a budget to this agent.
-func (a *Agent) AttachBudget(total float64) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.Budget = &AgentBudget{
-		AgentID: a.ID,
-		Budget:  NewBudget(total),
-	}
-}
-
-// TotalCapabilityScore returns the sum of all capability scores.
-func (a *Agent) TotalCapabilityScore() float64 {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	var sum float64
-	for _, c := range a.Capabilities {
-		sum += c.Score
-	}
-	return sum
-}
-
-// String returns a concise representation of the agent.
+// String returns a concise representation.
 func (a *Agent) String() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	budgetStr := "no budget"
-	if a.Budget != nil {
-		budgetStr = fmt.Sprintf("budget(total=%.0f γ=%.0f η=%.0f)",
-			a.Budget.Budget.Total, a.Budget.Budget.Gamma, a.Budget.Budget.Eta)
-	}
-	return fmt.Sprintf("Agent[%s] caps=%d %s", a.ID, len(a.Capabilities), budgetStr)
+	return fmt.Sprintf("Agent[%s] caps=%d states=%d", a.ID, len(a.Capabilities), len(a.State))
 }
